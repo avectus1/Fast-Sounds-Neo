@@ -23,6 +23,7 @@ public class Config {
     private static final ForgeConfigSpec.BooleanValue ENABLE_CAMERA_THROTTLE;
     private static final ForgeConfigSpec.BooleanValue ENABLE_STAGGERED_STOPPED;
     private static final ForgeConfigSpec.IntValue STAGGERED_TICK_INTERVAL;
+    private static final ForgeConfigSpec.BooleanValue NON_BLOCKING_PLAY;
 
     private static final ForgeConfigSpec.ConfigValue<List<? extends String>> DISTANCE_CULL_WHITELIST;
     private static final ForgeConfigSpec.ConfigValue<List<? extends String>> VOLUME_CULL_WHITELIST;
@@ -42,6 +43,7 @@ public class Config {
     public static boolean enableCameraThrottle = true;
     public static boolean enableStaggeredStopped = true;
     public static int staggeredTickInterval = 5;
+    public static boolean nonBlockingPlay = true;
 
     public static List<? extends String> distanceCullWhitelist = List.of();
     public static List<? extends String> volumeCullWhitelist = List.of("ambientsounds");
@@ -69,6 +71,8 @@ public class Config {
                 .define("enableStaggeredStopped", true);
         STAGGERED_TICK_INTERVAL = builder.comment("The tick interval at which staggered status checks run per sound channel.")
                 .defineInRange("staggeredTickInterval", 5, 1, 20);
+        NON_BLOCKING_PLAY = builder.comment("Start sounds without making the game wait for the sound thread. Vanilla stops the frame until the sound thread hands back a channel for every sound that starts, which adds up when many mobs walk or fight around you.")
+                .define("nonBlockingPlay", true);
         builder.pop();
 
         builder.push("whitelists");
@@ -95,6 +99,7 @@ public class Config {
     private static void bakeConfig() {
         enableDynamicMixing = ENABLE_DYNAMIC_MIXING.get();
         maxConcurrentSounds = MAX_CONCURRENT_SOUNDS.get();
+        nonBlockingPlay = NON_BLOCKING_PLAY.get();
         enableDistanceCull = ENABLE_DISTANCE_CULL.get();
         maxSoundDistance = MAX_SOUND_DISTANCE.get();
         enableVolumeCull = ENABLE_VOLUME_CULL.get();
