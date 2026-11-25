@@ -6,13 +6,6 @@ It makes Minecraft's sound engine lighter by skipping sounds you can't really he
 
 Based on Leandrohunter's unofficial 1.21.1 port and the FastSounds 0.6 source. See `NOTICE` for what changed.
 
-## Building
-
-```
-./gradlew build
-```
-
-The jar ends up in `build/libs`.
 
 ## License
 
