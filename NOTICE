@@ -1,0 +1,27 @@
+FastSounds Neo - unofficial NeoForge 1.21.1 port of FastSounds 0.6 by Misanthropy.
+Licensed under the GNU LGPL 3.0 (see LICENSE and COPYING), same as the original.
+
+Based on Leandrohunter's unofficial NeoForge 1.21.1 port (fastsounds-0.5-neoforge-1.21.1).
+
+Ported from FastSounds 0.6: non-blocking play (sounds start without the game
+waiting on the sound thread), as a MixinExtras @WrapOperation instead of a
+@Redirect so it stays compatible with other mods.
+
+Changes from that port:
+- Whitelist and critical-sound checks cached per sound id (no String allocation
+  or list scanning per played sound / per eviction candidate).
+- Removed the @Redirect on ChannelHandle.isStopped in tickNonPaused. On 1.21.1
+  that call is a plain field read, so "staggered stopped" checks gave no gain and
+  kept finished channels occupied for up to 5 extra ticks. Its config keys are
+  kept as no-ops so existing configs still load.
+- Evicting a sound now returns its OpenAL source to the pool immediately (queued
+  on the sound thread ahead of the new sound's channel request). Before, evicted
+  channels were only freed on the next tick, so in a burst the pool filled up and
+  new sounds failed anyway ("Failed to create new sound handle") after farther
+  sounds had already been cut. Already-evicted sounds no longer count toward
+  maxConcurrentSounds, so later sounds don't evict more than needed.
+- Distance culling and eviction measure from the camera (audio listener)
+  instead of the player.
+- Monotonic clock for cooldowns; floor() for the dedup grid on negative coords.
+- Wider NeoForge range (21.1.x) and @Mod(dist = CLIENT).
+Config file name, keys, defaults and ranges are unchanged.

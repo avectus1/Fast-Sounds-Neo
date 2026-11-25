@@ -1,0 +1,7 @@
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "LGPL-3.0-only"
+[[mods]]
+modId = "fstest"
+version = "1"
+displayName = "FastSounds test harness"

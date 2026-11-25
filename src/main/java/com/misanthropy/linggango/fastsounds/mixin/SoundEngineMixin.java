@@ -1,7 +1,13 @@
 package com.misanthropy.linggango.fastsounds.mixin;
 
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Map;
+import java.util.Set;
+
 import com.misanthropy.linggango.fastsounds.Config;
 import com.misanthropy.linggango.fastsounds.Fastsounds;
+import com.misanthropy.linggango.fastsounds.optimization.ChannelPool;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.sounds.SoundInstance;
@@ -15,106 +21,106 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-
-import java.util.Collections;
-import java.util.IdentityHashMap;
-import java.util.Map;
-import java.util.Set;
 
 @Mixin(value = SoundEngine.class, priority = 999)
 public abstract class SoundEngineMixin {
+    @Unique
+    private static final double fastsounds$POS_EPSILON = 1.0E-4;
+    @Unique
+    private static final float fastsounds$DIR_EPSILON = 1.0E-4F;
 
-    @Shadow @Final private Map<SoundInstance, ?> instanceToChannel;
-    @Shadow private int tickCount;
+    @Shadow
+    @Final
+    private Map<SoundInstance, ChannelAccess.ChannelHandle> instanceToChannel;
+    @Shadow
+    @Final
+    private ChannelAccess channelAccess;
+    @Shadow
+    private boolean loaded;
 
-    @Shadow public abstract void stop(SoundInstance sound);
+    /** Sounds we already asked to stop; their channel is released on the next tick. */
+    @Unique
+    private final Set<SoundInstance> fastsounds$pendingEvictions = Collections.newSetFromMap(new IdentityHashMap<>());
 
     @Unique
-    private final Set<SoundInstance> fastsounds$pendingEvictions =
-            Collections.newSetFromMap(new IdentityHashMap<>());
+    private double fastsounds$lastCamX = Double.NaN;
+    @Unique
+    private double fastsounds$lastCamY;
+    @Unique
+    private double fastsounds$lastCamZ;
+    @Unique
+    private float fastsounds$lastLookX, fastsounds$lastLookY, fastsounds$lastLookZ;
+    @Unique
+    private float fastsounds$lastUpX, fastsounds$lastUpY, fastsounds$lastUpZ;
 
-    @Unique private double fastsounds$lastCamX = Double.NaN;
-    @Unique private double fastsounds$lastCamY = Double.NaN;
-    @Unique private double fastsounds$lastCamZ = Double.NaN;
-    @Unique private float fastsounds$lastLookX, fastsounds$lastLookY, fastsounds$lastLookZ;
-    @Unique private float fastsounds$lastUpX, fastsounds$lastUpY, fastsounds$lastUpZ;
-
+    /**
+     * Runs after NeoForge's PlaySoundEvent and after the sound is resolved,
+     * right before a channel is requested.
+     */
     @Inject(
-            method = "play",
+            method = "play(Lnet/minecraft/client/resources/sounds/SoundInstance;)V",
             at = @At(value = "INVOKE", target = "Lnet/minecraft/client/resources/sounds/SoundInstance;getSound()Lnet/minecraft/client/resources/sounds/Sound;"),
-            cancellable = true
+            cancellable = true,
+            require = 1,
+            allow = 1
     )
     private void fastsounds$onPlaySound(SoundInstance sound, CallbackInfo ci) {
-        if (sound == null) return;
-
-        if (Minecraft.getInstance().isPaused()) return;
+        if (sound == null || Minecraft.getInstance().isPaused()) {
+            return;
+        }
 
         Fastsounds.OPTIMIZER.recordSoundProcessed();
-
-        try {
-            fastsounds$pendingEvictions.removeIf(s -> !this.instanceToChannel.containsKey(s));
-        } catch (Exception ignored) {
+        if (!fastsounds$pendingEvictions.isEmpty()) {
+            fastsounds$pendingEvictions.removeIf(s -> !instanceToChannel.containsKey(s));
         }
 
-        if (Config.enableDynamicMixing) {
-            if (!Fastsounds.OPTIMIZER.shouldPlaySound(sound)) {
-                ci.cancel();
-                return;
-            }
+        if (Config.enableDynamicMixing && !Fastsounds.OPTIMIZER.shouldPlaySound(sound)) {
+            ci.cancel();
+            return;
         }
 
-        int activeCount;
-        try {
-            activeCount = this.instanceToChannel.size();
-        } catch (Exception e) {
-            activeCount = 0;
+        // Evicted sounds stay in instanceToChannel for up to 20 ticks, but their
+        // OpenAL source is already back in the pool (see ChannelAccessMixin).
+        if (instanceToChannel.size() - fastsounds$pendingEvictions.size() < Config.maxConcurrentSounds) {
+            return;
         }
 
-        if (activeCount >= Config.maxConcurrentSounds) {
-            SoundInstance soundToKill;
-            try {
-                soundToKill = Fastsounds.OPTIMIZER.getSoundToEvict(
-                        this.instanceToChannel.keySet(), fastsounds$pendingEvictions, sound);
-            } catch (Exception e) {
-                ci.cancel();
-                return;
-            }
-
-            if (soundToKill != null) {
-                try {
-                    fastsounds$pendingEvictions.add(soundToKill);
-                } catch (Exception ignored) {
-                }
-                this.stop(soundToKill);
-            } else {
-                ci.cancel();
-            }
+        SoundInstance victim = Fastsounds.OPTIMIZER.getSoundToEvict(instanceToChannel.keySet(), fastsounds$pendingEvictions, sound);
+        ChannelAccess.ChannelHandle handle = victim == null ? null : instanceToChannel.get(victim);
+        if (handle != null) {
+            fastsounds$pendingEvictions.add(victim);
+            ((ChannelPool) channelAccess).fastsounds$releaseNow(handle);
+        } else {
+            ci.cancel();
         }
     }
 
-    @Inject(method = "updateSource", at = @At("HEAD"), cancellable = true)
+    /**
+     * Vanilla allocates a ListenerTransform + two Vec3 and queues a task on the
+     * sound thread every frame. Skip that while the camera hasn't moved.
+     */
+    @Inject(method = "updateSource(Lnet/minecraft/client/Camera;)V", at = @At("HEAD"), cancellable = true, require = 1, allow = 1)
     private void fastsounds$throttleUpdateSource(Camera camera, CallbackInfo ci) {
-        if (!Config.enableCameraThrottle) return;
-
-        if (camera == null || !camera.isInitialized()) return;
+        if (!loaded || !Config.enableCameraThrottle || camera == null || !camera.isInitialized()) {
+            fastsounds$lastCamX = Double.NaN;
+            return;
+        }
 
         Vec3 pos = camera.getPosition();
         Vector3f look = camera.getLookVector();
         Vector3f up = camera.getUpVector();
 
-        if (!Double.isNaN(fastsounds$lastCamX) &&
-                Math.abs(fastsounds$lastCamX - pos.x) < 0.0001 &&
-                Math.abs(fastsounds$lastCamY - pos.y) < 0.0001 &&
-                Math.abs(fastsounds$lastCamZ - pos.z) < 0.0001 &&
-                Math.abs(fastsounds$lastLookX - look.x()) < 0.0001f &&
-                Math.abs(fastsounds$lastLookY - look.y()) < 0.0001f &&
-                Math.abs(fastsounds$lastLookZ - look.z()) < 0.0001f &&
-                Math.abs(fastsounds$lastUpX - up.x()) < 0.0001f &&
-                Math.abs(fastsounds$lastUpY - up.y()) < 0.0001f &&
-                Math.abs(fastsounds$lastUpZ - up.z()) < 0.0001f) {
-
+        if (!Double.isNaN(fastsounds$lastCamX)
+                && Math.abs(fastsounds$lastCamX - pos.x) < fastsounds$POS_EPSILON
+                && Math.abs(fastsounds$lastCamY - pos.y) < fastsounds$POS_EPSILON
+                && Math.abs(fastsounds$lastCamZ - pos.z) < fastsounds$POS_EPSILON
+                && Math.abs(fastsounds$lastLookX - look.x) < fastsounds$DIR_EPSILON
+                && Math.abs(fastsounds$lastLookY - look.y) < fastsounds$DIR_EPSILON
+                && Math.abs(fastsounds$lastLookZ - look.z) < fastsounds$DIR_EPSILON
+                && Math.abs(fastsounds$lastUpX - up.x) < fastsounds$DIR_EPSILON
+                && Math.abs(fastsounds$lastUpY - up.y) < fastsounds$DIR_EPSILON
+                && Math.abs(fastsounds$lastUpZ - up.z) < fastsounds$DIR_EPSILON) {
             ci.cancel();
             return;
         }
@@ -122,35 +128,19 @@ public abstract class SoundEngineMixin {
         fastsounds$lastCamX = pos.x;
         fastsounds$lastCamY = pos.y;
         fastsounds$lastCamZ = pos.z;
-        fastsounds$lastLookX = look.x();
-        fastsounds$lastLookY = look.y();
-        fastsounds$lastLookZ = look.z();
-        fastsounds$lastUpX = up.x();
-        fastsounds$lastUpY = up.y();
-        fastsounds$lastUpZ = up.z();
+        fastsounds$lastLookX = look.x;
+        fastsounds$lastLookY = look.y;
+        fastsounds$lastLookZ = look.z;
+        fastsounds$lastUpX = up.x;
+        fastsounds$lastUpY = up.y;
+        fastsounds$lastUpZ = up.z;
     }
 
-    @Redirect(method = "tickNonPaused", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/sounds/ChannelAccess$ChannelHandle;isStopped()Z"))
-    private boolean fastsounds$staggeredIsStopped(ChannelAccess.ChannelHandle handle) {
-        if (!Config.enableStaggeredStopped) {
-            return handle.isStopped();
-        }
-
-        int activeCount;
-        try {
-            activeCount = this.instanceToChannel.size();
-        } catch (Exception e) {
-            activeCount = 0;
-        }
-
-        if (activeCount >= Config.maxConcurrentSounds - 20) {
-            return handle.isStopped();
-        }
-
-        if (Math.floorMod(this.tickCount + handle.hashCode(), Config.staggeredTickInterval) == 0) {
-            return handle.isStopped();
-        }
-
-        return false;
+    /** Sound engine reload (F3+T, device change): forget all cached state. */
+    @Inject(method = "destroy()V", at = @At("HEAD"), require = 1, allow = 1)
+    private void fastsounds$resetAfterDestroy(CallbackInfo ci) {
+        fastsounds$lastCamX = Double.NaN;
+        fastsounds$pendingEvictions.clear();
+        Fastsounds.OPTIMIZER.reset();
     }
 }
